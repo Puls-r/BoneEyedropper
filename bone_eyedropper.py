@@ -19,9 +19,8 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
     bl_description = "Select the bone of the target (Armature) of the constraint with the picker"
     bl_options = {"REGISTER", "UNDO"}
 
-    name: bpy.props.StringProperty(name="name", default="")
-    target: bpy.props.StringProperty(name="Target", default="")
-    constraint: bpy.props.StringProperty(name="Constraint", default="")
+    obj: bpy.props.StringProperty(name="Object", default="")
+    path: bpy.props.StringProperty(name="Path", default="")
     __handler = None
 
     @classmethod
@@ -33,6 +32,8 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__mousecoord = None
         self.__bonecoord_head = None
         self.__bonecoord_tail = None
+        self.object = bpy.data.objects.get(self.obj)
+        self.constraint = self.object.path_resolve(self.path)
 
     def __bonecoord(self):
         return Vector((self.__bonecoord_head + self.__bonecoord_tail) / 2)
@@ -137,16 +138,17 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         context.window.cursor_set("EYEDROPPER")
         region, area, space = get_region_under_cursor(context, event)
         if region is None:
+            # Cursor is not in a 3D view
             return {"PASS_THROUGH"}
-        obj = bpy.data.objects.get(self.target)
-        consider_hidden_bones = event.shift
 
+        obj = self.constraint.target
+        consider_hidden_bones = event.shift
         min_bone = get_bone_from_cursor(context, event, obj, region, space, consider_hidden_bones)
         if event.type == "MOUSEMOVE":
+            # Update bone and cursor position
             self.__bonenname = min_bone.name if min_bone else None
             self.__mousecoord = Vector((event.mouse_x - region.x, event.mouse_y - region.y))
             if min_bone:
-                # self.__bonecoord = location_3d_to_region_2d(region, space.region_3d, bone_world_center)
                 self.__bonecoord_head = location_3d_to_region_2d(region, space.region_3d, obj.matrix_world @ min_bone.head)
                 self.__bonecoord_tail = location_3d_to_region_2d(region, space.region_3d, obj.matrix_world @ min_bone.tail)
             else:
@@ -154,21 +156,9 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                 self.__bonecoord_tail = None
             area.tag_redraw()
         elif event.type == "LEFTMOUSE" and event.value == "PRESS":
+            # Set subtarget
             if min_bone:
-                active_object = context.active_object
-                pose_bones = active_object.pose.bones
-                target = pose_bones.get(self.name)
-                if target is None:
-                    target = context.active_object
-                try:
-                    constraints = target.constraints
-                except Exception as e:
-                    self.report({"ERROR"}, "Failed to get constraints (If you are using Pin ID, please unpin it)")
-                    context.window.cursor_set("DEFAULT")
-                    area.tag_redraw()
-                    return {"CANCELLED"}
-                # Get the specific constraint
-                cot = constraints.get(self.constraint)
+                cot = self.constraint
                 if cot:
                     cot.subtarget = min_bone.name
                     self.report({"INFO"}, f"Subtarget set to {min_bone.name}")
@@ -177,6 +167,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             area.tag_redraw()
             return {"FINISHED"}
         elif event.type in {"RIGHTMOUSE", "ESC"}:
+            # Cancel operation
             context.window.cursor_set("DEFAULT")
             self.__handle_remove(context)
             area.tag_redraw()
@@ -199,6 +190,7 @@ def get_region_under_cursor(context, event) -> tuple[bpy.types.Region, bpy.types
         if area.type == "VIEW_3D":
             for region in area.regions:
                 if region.type == "WINDOW":
+                    # Check if cursor is in the region
                     if region.x <= event.mouse_x <= region.x + region.width and region.y <= event.mouse_y <= region.y + region.height:
                         space = area.spaces.active
                         return region, area, space
@@ -206,40 +198,44 @@ def get_region_under_cursor(context, event) -> tuple[bpy.types.Region, bpy.types
 
 
 def get_bone_from_cursor(context, event, obj, region, space, consider_hidden_bones=False):
+    """
+    Returns the bone closest to the cursor position in the specified region.
+    """
     coord = Vector((event.mouse_x - region.x, event.mouse_y - region.y))
     min_dist = float("inf")
     min_bone = None
-    bones = None
-    if bones is None:
-        bones = get_visible_bones(obj, consider_hidden_bones)
+    bones = get_visible_pose_bones(obj, consider_hidden_bones)
     for b in bones:
+        # world pos
         head = obj.matrix_world @ b.head
         tail = obj.matrix_world @ b.tail
         bone_world_center = (head + tail) / 2
+        # convert to region 2d
         bcoord = location_3d_to_region_2d(region, space.region_3d, bone_world_center)
         if bcoord is None:
             continue
         dist = (bcoord - coord).length
+        # find the closest bone
         if dist < min_dist:
             min_dist = dist
             min_bone = b
     return min_bone
 
 
-def get_visible_bones(obj: bpy.types.Object, consider_hidden_bones=False):
+def get_visible_pose_bones(obj: bpy.types.Object, consider_hidden_bones=False):
     # Get bones from visible Bone Collections
-    visible_bones = []
-    if obj.data.collections_all:
-        visible_bones = [
-            b
-            for c in obj.data.collections_all
-            if c.is_visible or consider_hidden_bones
-            for b in c.bones
-            if not b.hide or consider_hidden_bones
-        ]
-    else:
-        visible_bones = [b for b in obj.data.bones if not b.hide or consider_hidden_bones]
-    # convert to pose bones
+    visible_bones = [
+        b for c in obj.data.collections_all if c.is_visible or consider_hidden_bones for b in c.bones if not b.hide or consider_hidden_bones
+    ]
+
+    # Get bones that don't belong to any collection
+    all_bones = set(obj.data.bones)
+    collection_bones = {b for c in obj.data.collections_all for b in c.bones}
+    # Bones that don't belong in either collection
+    non_collection_bones = all_bones - collection_bones
+    visible_bones.extend(b for b in non_collection_bones if not b.hide or consider_hidden_bones)
+
+    # Convert to pose bones
     pose_bones = obj.pose.bones
     return [pose_bones.get(b.name) for b in visible_bones if pose_bones.get(b.name) is not None]
 
@@ -266,19 +262,9 @@ def target_template(layout, con, subtargets=True):
         if con.target.type == "ARMATURE":
             row = col.row(align=True)
             row.prop_search(con, "subtarget", con.target.data, "bones", text="Bone")
-
-            def get_name_from_constraint(constraint):
-                path = constraint.path_from_id()
-                if path.startswith('pose.bones["'):
-                    bone_name = path.split('"')[1]
-                    return bone_name
-                else:
-                    return con.id_data.name
-
-            op = row.operator("object.bone_eyedropper", text="", icon="EYEDROPPER")
-            op.target = con.target.name
-            op.name = get_name_from_constraint(con)
-            op.constraint = con.name
+            op = row.operator("object.bone_eyedropper", text="", icon="EYEDROPPER")  # Eyedropper
+            op.obj = con.id_data.name
+            op.path = con.path_from_id()
             if con.subtarget and hasattr(con, "head_tail"):
                 row = col.row(align=True)
                 row.use_property_decorate = False
@@ -297,6 +283,7 @@ def target_template(layout, con, subtargets=True):
 def overwrite_constraint_ui():
     """Overwrite the target_template function in properties_constraint.py"""
     module_name = "bl_ui.properties_constraint"
+    # monkey patch
     mod = sys.modules[module_name]
     mod.ConstraintButtonsPanel.target_template = target_template
 

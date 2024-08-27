@@ -5,13 +5,13 @@ schema_version = "1.0.0"
 id = "bone_eyedropper"
 version = "1.0.0"
 name = "Bone Eyedropper"
-tagline = "Select bone constrain subtarget using eyedropper."
+tagline = "Select bone constrain subtarget using eyedropper"
 maintainer = "Nifs <0sd_phu@gmail.com>"
 # Supported types: "add-on", "theme"
 type = "add-on"
 
 # Optional link to documentation, support, source files, etc
-# website = "https://extensions.blender.org/add-ons/my-example-package/"
+website = "https://github.com/Puls-r/BoneEyedropper"
 
 # Optional list defined by Blender and server, see:
 # https://docs.blender.org/manual/en/dev/advanced/extensions/tags.html
