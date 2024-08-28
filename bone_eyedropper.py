@@ -26,7 +26,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.active_object and context.active_object.type == "ARMATURE"
+        return context.active_object
 
     def __init__(self):
         self.__bonenname = None
@@ -35,7 +35,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__bonecoord_tail = None
         self.object = bpy.data.objects.get(self.obj)
         self.constraint: bpy.types.Constraint = self.object.path_resolve(
-            self.path, False
+            self.path
         )
 
     def __bonecoord(self):
@@ -217,14 +217,10 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         return {"PASS_THROUGH"}
 
     def invoke(self, context, event):
-        if context.active_object and context.active_object.type == "ARMATURE":
-            self.__handle_remove(context)
-            self.__handle_add(context)
-            context.window_manager.modal_handler_add(self)
-            return {"RUNNING_MODAL"}
-        else:
-            self.report({"ERROR"}, "Active object is not an armature")
-            return {"CANCELLED"}
+        self.__handle_remove(context)
+        self.__handle_add(context)
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
 
 
 def get_region_under_cursor(
@@ -334,7 +330,7 @@ def draw_object(self: bpy.types.Panel, context: bpy.types.Context):
     sp.label(text=active_constraint.target.name)
     op = sp.operator("object.bone_eyedropper",
                      text="Bone Eyedropper", icon="EYEDROPPER")
-    op.obj = active_constraint.target.name
+    op.obj = active_constraint.id_data.name
     op.path = active_constraint.path_from_id()
 
 
