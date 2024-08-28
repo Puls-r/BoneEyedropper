@@ -20,8 +20,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
     )
     bl_options = {"REGISTER", "UNDO"}
 
-    obj: bpy.props.StringProperty(name="Object", default="")
-    path: bpy.props.StringProperty(name="Path", default="")
+    property: bpy.props.StringProperty(name="Property", default="")
     __handler = None
 
     @classmethod
@@ -33,10 +32,8 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__mousecoord = None
         self.__bonecoord_head = None
         self.__bonecoord_tail = None
-        self.object = bpy.data.objects.get(self.obj)
-        self.constraint: bpy.types.Constraint = self.object.path_resolve(
-            self.path
-        )
+        self.data_path = None
+        self.object = None
 
     def __bonecoord(self):
         return Vector((self.__bonecoord_head + self.__bonecoord_tail) / 2)
@@ -61,13 +58,15 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             and self.__bonecoord_head
             and self.__bonecoord_tail
         ):
+            # pref
+            pref = get_prefereces()
             # Calculate position
             x = self.__mousecoord.x + 50
             y = self.__mousecoord.y + 50
 
             # Set text size and get dimensions
             font_id = 0
-            blf.size(font_id, 17)
+            blf.size(font_id, pref.text_size)
             text_width, text_height = blf.dimensions(font_id, self.__bonenname)
 
             # Draw dashed line (Debug)
@@ -84,7 +83,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             )
             batch = batch_for_shader(shader, "TRI_FAN", {"pos": vertices})
             shader.bind()
-            shader.uniform_float("color", (0.1, 0.1, 0.1, 0.8))
+            shader.uniform_float("color", pref.back_color)
             batch.draw(shader)
 
             # Draw text
@@ -112,6 +111,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         batch.draw(shader)
 
     def __draw_bone_line(self):
+        pref = get_prefereces()
         shader = gpu.shader.from_builtin("UNIFORM_COLOR")
         shader.bind()
         length = (self.__bonecoord_head - self.__bonecoord_tail).length
@@ -120,7 +120,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         # Draw line
         vertices = [self.__bonecoord_head, self.__bonecoord_tail]
         batch = batch_for_shader(shader, "LINE_STRIP", {"pos": vertices})
-        shader.uniform_float("color", (0.0, 1.0, 0.0, 0.5))
+        shader.uniform_float("color", pref.bone_suggestions_color)
         batch.draw(shader)
 
     def __rounded_rect_vertices(self, x, y, width, height, radius):
@@ -168,14 +168,27 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
 
         return vertices
 
+    def __end(self, context, area):
+        # End operation
+        context.window.cursor_set("DEFAULT")
+        self.__handle_remove(context)
+        area.tag_redraw()
+
     def modal(self, context, event):
         context.window.cursor_set("EYEDROPPER")
         region, area, space = get_region_under_cursor(context, event)
         if region is None:
             # Cursor is not in a 3D view
             return {"PASS_THROUGH"}
-
-        obj = self.constraint.target
+        con, pro = get_constraint_from_datapath(self.data_path)
+        if pro == "subtarget":
+            obj = con.target
+        elif pro == "pole_subtarget":
+            obj = con.pole_target
+        else:
+            self.report({"ERROR"}, "Invalid property")
+            self.__end(context, area)
+            return {"CANCELLED"}
         consider_hidden_bones = event.shift
         min_bone = get_bone_from_cursor(
             context, event, obj, region, space, consider_hidden_bones
@@ -198,29 +211,53 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                 self.__bonecoord_tail = None
             area.tag_redraw()
         elif event.type == "LEFTMOUSE" and event.value == "PRESS":
-            # Set subtarget
+            # Set
             if min_bone:
-                cot = self.constraint
-                if cot:
-                    cot.subtarget = min_bone.name
-                    self.report({"INFO"}, f"Subtarget set to {min_bone.name}")
-            context.window.cursor_set("DEFAULT")
-            self.__handle_remove(context)
-            area.tag_redraw()
+                try:
+                    setattr(con, pro, min_bone.name)
+                    self.report(
+                        {"INFO"}, f"{self.data_path} set to {min_bone.name}")
+                except Exception as e:
+                    self.report({"ERROR"}, f"Error setting subtarget: {e}")
+                    self.__end(context, area)
+                    return {"CANCELLED"}
+            self.__end(context, area)
             return {"FINISHED"}
         elif event.type in {"RIGHTMOUSE", "ESC"}:
-            # Cancel operation
-            context.window.cursor_set("DEFAULT")
-            self.__handle_remove(context)
-            area.tag_redraw()
+            self.__end(context, area)
             return {"CANCELLED"}
         return {"PASS_THROUGH"}
 
     def invoke(self, context, event):
+        tmp = context.window_manager.clipboard
+        # I honestly can't believe this is the solution.
+        # Get the data path of the property
+        bpy.ops.ui.copy_data_path_button(full_path=True)
+        self.data_path = context.window_manager.clipboard
+        context.window_manager.clipboard = tmp
         self.__handle_remove(context)
         self.__handle_add(context)
         context.window_manager.modal_handler_add(self)
         return {"RUNNING_MODAL"}
+
+
+def get_constraint_from_datapath(data_path):
+    def remove_last_property(data_path):
+        import re
+        # Example:
+        # bpy.data.objects["Armature"].pose.bones["Bone"].constraints["Constraint"].subtarget
+        # -> bpy.data.objects["Armature"].pose.bones["Bone"].constraints["Constraint"]  subtarget
+        pattern = r'(.*)\.[^.]+$'
+        match = re.match(pattern, data_path)
+        if match:
+            return match.group(1), data_path.replace(match.group(1) + ".", "")
+        return None, None
+    tuple_data_path = remove_last_property(data_path)
+    return eval(tuple_data_path[0]), tuple_data_path[1]
+
+
+def get_prefereces():
+    return bpy.context.preferences.addons[__package__].preferences
 
 
 def get_region_under_cursor(
@@ -296,58 +333,74 @@ def get_visible_pose_bones(obj: bpy.types.Object, consider_hidden_bones=False):
     ]
 
 
-def get_active_constraint(context: bpy.types.Context):
-    constraints = context.pose_bone.constraints if context.mode == "POSE" else context.object.constraints
-    return (
-        constraints.active
-        if constraints.active and constraints.active.target and constraints.active.target.type == "ARMATURE"
-        else next((con for con in constraints if con.target and con.target.type == "ARMATURE"), None)
+def draw_menu(self, context: bpy.types.Context):
+    # context menu
+    if not context.property[1] in {"subtarget", "pole_subtarget"}:
+        return
+    layout = self.layout
+    layout.separator()
+    layout.operator(OBJECT_OT_BoneEyedropper.bl_idname,
+                    text="Bone Eyedropper", icon="EYEDROPPER")
+
+
+class BoneEyedropperPreferences(bpy.types.AddonPreferences):
+    bl_idname = __package__
+
+    bone_suggestions_color: bpy.props.FloatVectorProperty(
+        name="Bone Suggestions Color",
+        subtype="COLOR",
+        size=4,
+        default=(0.0, 1.0, 0.0, 1.0),
+        min=0.0,
+        max=1.0,
+        soft_min=0.0,
+        soft_max=1.0,
     )
 
-
-def draw_bone(self: bpy.types.Panel, context: bpy.types.Context):
-    layout = self.layout
-    sp = layout.row().split(factor=0.4)
-    active_constraint = get_active_constraint(context)
-    if active_constraint is None:
-        sp.label(text="Bone Eyedropper : No valid constraint", icon="ERROR")
-        return
-    sp.label(text=active_constraint.name)
-    op = sp.operator(
-        "object.bone_eyedropper", text="Bone Eyedropper", icon="EYEDROPPER"
+    text_size: bpy.props.IntProperty(
+        name="Text Size",
+        default=17,
+        min=1,
+        max=100,
+        soft_min=1,
+        soft_max=100,
+        subtype="FACTOR",
     )
-    op.obj = active_constraint.id_data.name
-    op.path = active_constraint.path_from_id()
 
+    back_color: bpy.props.FloatVectorProperty(
+        name="Background Color",
+        subtype="COLOR",
+        size=4,
+        default=(0.1, 0.1, 0.1, 0.8),
+        min=0.0,
+        max=1.0,
+        soft_min=0.0,
+        soft_max=1.0,
+    )
 
-def draw_object(self: bpy.types.Panel, context: bpy.types.Context):
-    layout = self.layout
-    sp = layout.row().split(factor=0.4)
-    active_constraint = get_active_constraint(context)
-    if active_constraint is None:
-        sp.label(text="Bone Eyedropper : No valid constraint", icon="ERROR")
-        return
-    sp.label(text=active_constraint.target.name)
-    op = sp.operator("object.bone_eyedropper",
-                     text="Bone Eyedropper", icon="EYEDROPPER")
-    op.obj = active_constraint.id_data.name
-    op.path = active_constraint.path_from_id()
+    def draw(self, context):
+        layout = self.layout
+        row = layout.row()
+        row.prop(self, "bone_suggestions_color")
+        row = layout.row()
+        row.prop(self, "text_size")
+        row = layout.row()
+        row.prop(self, "back_color")
 
 
 classes = [
     OBJECT_OT_BoneEyedropper,
+    BoneEyedropperPreferences,
 ]
 
 
 def register_component():
     for cls in classes:
         bpy.utils.register_class(cls)
-    bpy.types.BONE_PT_constraints.append(draw_bone)
-    bpy.types.OBJECT_PT_constraints.append(draw_object)
+    bpy.types.UI_MT_button_context_menu.append(draw_menu)
 
 
 def unregister_component():
-    bpy.types.OBJECT_PT_constraints.remove(draw_object)
-    bpy.types.BONE_PT_constraints.remove(draw_bone)
+    bpy.types.UI_MT_button_context_menu.remove(draw_menu)
     for cls in classes:
         bpy.utils.unregister_class(cls)

@@ -9,7 +9,7 @@ if "bpy" in locals():
     import sys
 
     for k, v in list(sys.modules.items()):
-        if k.startswith("BoneEyedropper."):
+        if k.startswith("Bone Eyedropper."):
             importlib.reload(v)
 
 
