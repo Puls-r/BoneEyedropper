@@ -33,7 +33,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__bonecoord_head = None
         self.__bonecoord_tail = None
         self.object = bpy.data.objects.get(self.obj)
-        self.constraint = self.object.path_resolve(self.path)
+        self.constraint: bpy.types.Constraint = self.object.path_resolve(self.path)
 
     def __bonecoord(self):
         return Vector((self.__bonecoord_head + self.__bonecoord_tail) / 2)
@@ -282,10 +282,9 @@ def target_template(layout, con, subtargets=True):
 
 def overwrite_constraint_ui():
     """Overwrite the target_template function in properties_constraint.py"""
-    module_name = "bl_ui.properties_constraint"
-    # monkey patch
-    mod = sys.modules[module_name]
-    mod.ConstraintButtonsPanel.target_template = target_template
+    from bl_ui.properties_constraint import ConstraintButtonsPanel
+
+    ConstraintButtonsPanel.target_template = target_template
 
 
 @persistent

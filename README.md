@@ -1,5 +1,5 @@
 # Bone Eyedropper Add-on for Blender
-![Blender](https://img.shields.io/badge/Blender-3.6.0%2B-orange)
+![Blender](https://img.shields.io/badge/Blender-4.2.0%2B-orange)
 ![License](https://img.shields.io/badge/License-GPLv3-blue)
 
 ## Overview
