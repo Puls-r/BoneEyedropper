@@ -6,8 +6,7 @@ import bpy
 import blf
 import gpu
 import math
-import sys
-from mathutils import Vector, Matrix
+from mathutils import Vector
 from gpu_extras.batch import batch_for_shader
 from bpy_extras.view3d_utils import location_3d_to_region_2d
 from bpy.app.handlers import persistent
@@ -240,72 +239,40 @@ def get_visible_pose_bones(obj: bpy.types.Object, consider_hidden_bones=False):
     return [pose_bones.get(b.name) for b in visible_bones if pose_bones.get(b.name) is not None]
 
 
-class OBJECT_OT_Reload_Overwrite_UI(bpy.types.Operator):
-    bl_idname = "object.reload_overwrite_ui"
-    bl_label = "Reload Overwrite UI"
-    bl_description = "Reload the overwrite script"
-    bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        overwrite_constraint_ui()
-        return {"FINISHED"}
+def get_active_constraint(context: bpy.types.Context):
+    constraints = context.pose_bone.constraints
+    return (
+        constraints.active
+        if constraints.active and constraints.active.target and constraints.active.target.type == "ARMATURE"
+        else next((con for con in constraints if con.target and con.target.type == "ARMATURE"), None)
+    )
 
 
-### Code from https://projects.blender.org/blender/blender/src/branch/main/scripts/startup/bl_ui/properties_constraint.py
-@staticmethod
-def target_template(layout, con, subtargets=True):
-    col = layout.column()
-    row = col.row(align=True)  # for adjusting layout
-    row.prop(con, "target")  # XXX: limiting settings for only `curves` or some type of object.
-
-    if con.target and subtargets:
-        if con.target.type == "ARMATURE":
-            row = col.row(align=True)
-            row.prop_search(con, "subtarget", con.target.data, "bones", text="Bone")
-            op = row.operator("object.bone_eyedropper", text="", icon="EYEDROPPER")  # Eyedropper
-            op.obj = con.id_data.name
-            op.path = con.path_from_id()
-            if con.subtarget and hasattr(con, "head_tail"):
-                row = col.row(align=True)
-                row.use_property_decorate = False
-                sub = row.row(align=True)
-                sub.prop(con, "head_tail")
-                # XXX icon, and only when bone has segments?
-                sub.prop(con, "use_bbone_shape", text="", icon="IPO_BEZIER")
-                row.prop_decorator(con, "head_tail")
-        elif con.target.type in {"MESH", "LATTICE"}:
-            col.prop_search(con, "subtarget", con.target, "vertex_groups", text="Vertex Group")
-
-
-###
-
-
-def overwrite_constraint_ui():
-    """Overwrite the target_template function in properties_constraint.py"""
-    from bl_ui.properties_constraint import ConstraintButtonsPanel
-
-    ConstraintButtonsPanel.target_template = target_template
-
-
-@persistent
-def load_post_handler(dummy):
-    overwrite_constraint_ui()
+def draw_bone(self: bpy.types.Panel, context: bpy.types.Context):
+    layout = self.layout
+    sp = layout.row().split(factor=0.4)
+    active_constraint = get_active_constraint(context)
+    if active_constraint is None:
+        sp.label(text="Bone Eyedropper : No valid constraint", icon="ERROR")
+        return
+    sp.label(text=active_constraint.name)
+    op = sp.operator("object.bone_eyedropper", text="Bone Eyedropper", icon="EYEDROPPER")
+    op.obj = active_constraint.id_data.name
+    op.path = active_constraint.path_from_id()
 
 
 classes = [
     OBJECT_OT_BoneEyedropper,
-    OBJECT_OT_Reload_Overwrite_UI,
 ]
 
 
 def register_component():
     for cls in classes:
         bpy.utils.register_class(cls)
-    overwrite_constraint_ui()
-    bpy.app.handlers.load_post.append(load_post_handler)
+    bpy.types.BONE_PT_constraints.append(draw_bone)
 
 
 def unregister_component():
-    bpy.app.handlers.load_post.remove(load_post_handler)
+    bpy.types.BONE_PT_constraints.remove(draw_bone)
     for cls in classes:
         bpy.utils.unregister_class(cls)
