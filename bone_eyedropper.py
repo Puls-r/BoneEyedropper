@@ -15,7 +15,9 @@ from bpy.app.handlers import persistent
 class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
     bl_idname = "object.bone_eyedropper"
     bl_label = "Bone Eyedropper"
-    bl_description = "Select the bone of the target (Armature) of the constraint with the picker"
+    bl_description = (
+        "Select the bone of the target (Armature) of the constraint with the picker"
+    )
     bl_options = {"REGISTER", "UNDO"}
 
     obj: bpy.props.StringProperty(name="Object", default="")
@@ -32,22 +34,33 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__bonecoord_head = None
         self.__bonecoord_tail = None
         self.object = bpy.data.objects.get(self.obj)
-        self.constraint: bpy.types.Constraint = self.object.path_resolve(self.path)
+        self.constraint: bpy.types.Constraint = self.object.path_resolve(
+            self.path, False
+        )
 
     def __bonecoord(self):
         return Vector((self.__bonecoord_head + self.__bonecoord_tail) / 2)
 
     def __handle_add(self, context):
         if OBJECT_OT_BoneEyedropper.__handler is None:
-            OBJECT_OT_BoneEyedropper.__handler = bpy.types.SpaceView3D.draw_handler_add(self.__draw, (context,), "WINDOW", "POST_PIXEL")
+            OBJECT_OT_BoneEyedropper.__handler = bpy.types.SpaceView3D.draw_handler_add(
+                self.__draw, (context,), "WINDOW", "POST_PIXEL"
+            )
 
     def __handle_remove(self, context):
         if OBJECT_OT_BoneEyedropper.__handler is not None:
-            bpy.types.SpaceView3D.draw_handler_remove(OBJECT_OT_BoneEyedropper.__handler, "WINDOW")
+            bpy.types.SpaceView3D.draw_handler_remove(
+                OBJECT_OT_BoneEyedropper.__handler, "WINDOW"
+            )
             OBJECT_OT_BoneEyedropper.__handler = None
 
     def __draw(self, context):
-        if self.__bonenname and self.__mousecoord and self.__bonecoord_head and self.__bonecoord_tail:
+        if (
+            self.__bonenname
+            and self.__mousecoord
+            and self.__bonecoord_head
+            and self.__bonecoord_tail
+        ):
             # Calculate position
             x = self.__mousecoord.x + 50
             y = self.__mousecoord.y + 50
@@ -66,7 +79,9 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             # Set background color and draw rounded rectangle
             shader = gpu.shader.from_builtin("UNIFORM_COLOR")
             radius = 5
-            vertices = self.__rounded_rect_vertices(x - 5, y - 5, text_width + 15, text_height + 10, radius)
+            vertices = self.__rounded_rect_vertices(
+                x - 5, y - 5, text_width + 15, text_height + 10, radius
+            )
             batch = batch_for_shader(shader, "TRI_FAN", {"pos": vertices})
             shader.bind()
             shader.uniform_float("color", (0.1, 0.1, 0.1, 0.8))
@@ -114,22 +129,42 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         # Bottom-left corner
         for i in range(segments + 1):
             angle = (i / segments) * (math.pi / 2)
-            vertices.append((x + radius - radius * math.cos(angle), y + radius - radius * math.sin(angle)))
+            vertices.append(
+                (
+                    x + radius - radius * math.cos(angle),
+                    y + radius - radius * math.sin(angle),
+                )
+            )
 
         # Bottom-right corner
         for i in range(segments + 1):
             angle = (i / segments) * (math.pi / 2)
-            vertices.append((x + width - radius + radius * math.sin(angle), y + radius - radius * math.cos(angle)))
+            vertices.append(
+                (
+                    x + width - radius + radius * math.sin(angle),
+                    y + radius - radius * math.cos(angle),
+                )
+            )
 
         # Top-right corner
         for i in range(segments + 1):
             angle = (i / segments) * (math.pi / 2)
-            vertices.append((x + width - radius + radius * math.cos(angle), y + height - radius + radius * math.sin(angle)))
+            vertices.append(
+                (
+                    x + width - radius + radius * math.cos(angle),
+                    y + height - radius + radius * math.sin(angle),
+                )
+            )
 
         # Top-left corner
         for i in range(segments + 1):
             angle = (i / segments) * (math.pi / 2)
-            vertices.append((x + radius - radius * math.sin(angle), y + height - radius + radius * math.cos(angle)))
+            vertices.append(
+                (
+                    x + radius - radius * math.sin(angle),
+                    y + height - radius + radius * math.cos(angle),
+                )
+            )
 
         return vertices
 
@@ -142,14 +177,22 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
 
         obj = self.constraint.target
         consider_hidden_bones = event.shift
-        min_bone = get_bone_from_cursor(context, event, obj, region, space, consider_hidden_bones)
+        min_bone = get_bone_from_cursor(
+            context, event, obj, region, space, consider_hidden_bones
+        )
         if event.type == "MOUSEMOVE":
             # Update bone and cursor position
             self.__bonenname = min_bone.name if min_bone else None
-            self.__mousecoord = Vector((event.mouse_x - region.x, event.mouse_y - region.y))
+            self.__mousecoord = Vector(
+                (event.mouse_x - region.x, event.mouse_y - region.y)
+            )
             if min_bone:
-                self.__bonecoord_head = location_3d_to_region_2d(region, space.region_3d, obj.matrix_world @ min_bone.head)
-                self.__bonecoord_tail = location_3d_to_region_2d(region, space.region_3d, obj.matrix_world @ min_bone.tail)
+                self.__bonecoord_head = location_3d_to_region_2d(
+                    region, space.region_3d, obj.matrix_world @ min_bone.head
+                )
+                self.__bonecoord_tail = location_3d_to_region_2d(
+                    region, space.region_3d, obj.matrix_world @ min_bone.tail
+                )
             else:
                 self.__bonecoord_head = None
                 self.__bonecoord_tail = None
@@ -184,19 +227,26 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             return {"CANCELLED"}
 
 
-def get_region_under_cursor(context, event) -> tuple[bpy.types.Region, bpy.types.Area, bpy.types.SpaceView3D]:
+def get_region_under_cursor(
+    context, event
+) -> tuple[bpy.types.Region, bpy.types.Area, bpy.types.SpaceView3D]:
     for area in context.screen.areas:
         if area.type == "VIEW_3D":
             for region in area.regions:
                 if region.type == "WINDOW":
                     # Check if cursor is in the region
-                    if region.x <= event.mouse_x <= region.x + region.width and region.y <= event.mouse_y <= region.y + region.height:
+                    if (
+                        region.x <= event.mouse_x <= region.x + region.width
+                        and region.y <= event.mouse_y <= region.y + region.height
+                    ):
                         space = area.spaces.active
                         return region, area, space
     return None, None, None
 
 
-def get_bone_from_cursor(context, event, obj, region, space, consider_hidden_bones=False):
+def get_bone_from_cursor(
+    context, event, obj, region, space, consider_hidden_bones=False
+):
     """
     Returns the bone closest to the cursor position in the specified region.
     """
@@ -210,7 +260,8 @@ def get_bone_from_cursor(context, event, obj, region, space, consider_hidden_bon
         tail = obj.matrix_world @ b.tail
         bone_world_center = (head + tail) / 2
         # convert to region 2d
-        bcoord = location_3d_to_region_2d(region, space.region_3d, bone_world_center)
+        bcoord = location_3d_to_region_2d(
+            region, space.region_3d, bone_world_center)
         if bcoord is None:
             continue
         dist = (bcoord - coord).length
@@ -224,7 +275,11 @@ def get_bone_from_cursor(context, event, obj, region, space, consider_hidden_bon
 def get_visible_pose_bones(obj: bpy.types.Object, consider_hidden_bones=False):
     # Get bones from visible Bone Collections
     visible_bones = [
-        b for c in obj.data.collections_all if c.is_visible or consider_hidden_bones for b in c.bones if not b.hide or consider_hidden_bones
+        b
+        for c in obj.data.collections_all
+        if c.is_visible or consider_hidden_bones
+        for b in c.bones
+        if not b.hide or consider_hidden_bones
     ]
 
     # Get bones that don't belong to any collection
@@ -232,15 +287,21 @@ def get_visible_pose_bones(obj: bpy.types.Object, consider_hidden_bones=False):
     collection_bones = {b for c in obj.data.collections_all for b in c.bones}
     # Bones that don't belong in either collection
     non_collection_bones = all_bones - collection_bones
-    visible_bones.extend(b for b in non_collection_bones if not b.hide or consider_hidden_bones)
+    visible_bones.extend(
+        b for b in non_collection_bones if not b.hide or consider_hidden_bones
+    )
 
     # Convert to pose bones
     pose_bones = obj.pose.bones
-    return [pose_bones.get(b.name) for b in visible_bones if pose_bones.get(b.name) is not None]
+    return [
+        pose_bones.get(b.name)
+        for b in visible_bones
+        if pose_bones.get(b.name) is not None
+    ]
 
 
 def get_active_constraint(context: bpy.types.Context):
-    constraints = context.pose_bone.constraints
+    constraints = context.pose_bone.constraints if context.mode == "POSE" else context.object.constraints
     return (
         constraints.active
         if constraints.active and constraints.active.target and constraints.active.target.type == "ARMATURE"
@@ -256,8 +317,24 @@ def draw_bone(self: bpy.types.Panel, context: bpy.types.Context):
         sp.label(text="Bone Eyedropper : No valid constraint", icon="ERROR")
         return
     sp.label(text=active_constraint.name)
-    op = sp.operator("object.bone_eyedropper", text="Bone Eyedropper", icon="EYEDROPPER")
+    op = sp.operator(
+        "object.bone_eyedropper", text="Bone Eyedropper", icon="EYEDROPPER"
+    )
     op.obj = active_constraint.id_data.name
+    op.path = active_constraint.path_from_id()
+
+
+def draw_object(self: bpy.types.Panel, context: bpy.types.Context):
+    layout = self.layout
+    sp = layout.row().split(factor=0.4)
+    active_constraint = get_active_constraint(context)
+    if active_constraint is None:
+        sp.label(text="Bone Eyedropper : No valid constraint", icon="ERROR")
+        return
+    sp.label(text=active_constraint.target.name)
+    op = sp.operator("object.bone_eyedropper",
+                     text="Bone Eyedropper", icon="EYEDROPPER")
+    op.obj = active_constraint.target.name
     op.path = active_constraint.path_from_id()
 
 
@@ -270,9 +347,11 @@ def register_component():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.BONE_PT_constraints.append(draw_bone)
+    bpy.types.OBJECT_PT_constraints.append(draw_object)
 
 
 def unregister_component():
+    bpy.types.OBJECT_PT_constraints.remove(draw_object)
     bpy.types.BONE_PT_constraints.remove(draw_bone)
     for cls in classes:
         bpy.utils.unregister_class(cls)
