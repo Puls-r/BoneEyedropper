@@ -59,8 +59,8 @@ license = [
 #
 # [permissions]
 # network = "Need to sync motion-capture data to server"
-# files = "Import/export FBX from/to disk"
-# clipboard = "Copy and paste bone transforms"
+files = "Import .blend from disk"
+clipboard = "Copy property paths to clipboard"
 
 # Optional: build settings.
 # https://docs.blender.org/manual/en/dev/advanced/extensions/command_line_arguments.html#command-line-args-extension-build
