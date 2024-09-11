@@ -34,6 +34,12 @@ void main()
     fragColor = blender_srgb_to_framebuffer_space(fcolor);
 }
 '''
+valid_properties = {
+    "subtarget": ["target", "object"],
+    "pole_subtarget": ["pole_target"],
+    "parent": ["id_data"],
+    "bone_target": ["id"],  # DriverTarget
+}
 
 
 class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
@@ -57,10 +63,15 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__bonecoord_tail = None
         self.data_path = None
         self.object = None
-        self.constraint = None
+        self.struct = None
+        self.property = None
+        self.property_name = None
         self.target = None
         self.hidden = False
         self.bone_mesh = None
+        self.bones = []
+        self.current_bone_index = 0
+        self.copy_name_mode = False
 
     def __bonecoord(self):
         return Vector((self.__bonecoord_head + self.__bonecoord_tail) / 2)
@@ -83,6 +94,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         context.window.cursor_set("DEFAULT")
         self.__handle_remove(context)
         area.tag_redraw()
+        context.workspace.status_text_set(None)
         try:
             # Remove bone mesh
             bpy.data.meshes.remove(self.bone_mesh.data)
@@ -235,9 +247,31 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
 
         return vertices
 
+    def __update_bone_coordinates(self, region, event, space, min_bone):
+        self.__bonenname = min_bone.name if min_bone else None
+        self.__mousecoord = Vector(
+            (event.mouse_x - region.x, event.mouse_y - region.y)
+        )
+        if min_bone:
+            self.__bonecoord_head = location_3d_to_region_2d(
+                region, space.region_3d, self.target.matrix_world @ min_bone.head
+            )
+            self.__bonecoord_tail = location_3d_to_region_2d(
+                region, space.region_3d, self.target.matrix_world @ min_bone.tail
+            )
+        else:
+            self.__bonecoord_head = None
+            self.__bonecoord_tail = None
+
     def modal(self, context, event):
+        context.workspace.status_text_set(
+            f"Ctl+Wheel: Change closest bone | Shift: Get hidden bones | LMB: Set bone | RMB/Esc: Cancel")
+
         context.window.cursor_set("EYEDROPPER")
         region, area, space = get_region_under_cursor(context, event)
+        if event.type in {"RIGHTMOUSE", "ESC"}:
+            self.__end(context, area)
+            return {"CANCELLED"}
         if event.shift:
             self.hidden = True
         else:
@@ -249,62 +283,102 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             # How to get active bone from outliner context?
             return {"PASS_THROUGH"}
         elif area.type == "VIEW_3D":
-            self.constraint, pro = get_constraint_from_datapath(self.data_path)
-            if pro == "subtarget":
-                self.target = self.constraint.target
-            elif pro == "pole_subtarget":
-                self.target = self.constraint.pole_target
-            else:
-                self.report({"ERROR"}, "Invalid property")
-                self.__end(context, area)
-                return {"CANCELLED"}
-
-            min_bone = get_bone_from_cursor(
+            if event.type == "MOUSEMOVE":
+                self.current_bone_index = 0
+            # Get min bone from the list
+            self.bones = get_closest_bones(
                 context, event, self.target, region, space
             )
-            if event.type == "MOUSEMOVE":
-                # Update bone and cursor position
-                self.__bonenname = min_bone.name if min_bone else None
-                self.__mousecoord = Vector(
-                    (event.mouse_x - region.x, event.mouse_y - region.y)
-                )
-                if min_bone:
-                    self.__bonecoord_head = location_3d_to_region_2d(
-                        region, space.region_3d, self.target.matrix_world @ min_bone.head
-                    )
-                    self.__bonecoord_tail = location_3d_to_region_2d(
-                        region, space.region_3d, self.target.matrix_world @ min_bone.tail
-                    )
-                else:
-                    self.__bonecoord_head = None
-                    self.__bonecoord_tail = None
-                area.tag_redraw()
-            elif event.type == "LEFTMOUSE" and event.value == "PRESS":
+            if event.type == "WHEELUPMOUSE" and event.ctrl:
+                # limit the index to the length of the list
+                self.current_bone_index = min(
+                    self.current_bone_index + 1, len(self.bones) - 1)
+            elif event.type == "WHEELDOWNMOUSE" and event.ctrl:
+                # limit the index to 0
+                self.current_bone_index = max(
+                    self.current_bone_index - 1, 0)
+            min_bone = self.bones[self. current_bone_index]
+            self.__update_bone_coordinates(region, event, space, min_bone)
+            if event.type == "LEFTMOUSE" and event.value == "PRESS":
                 # Set
                 if min_bone:
-                    try:
-                        setattr(self.constraint, pro, min_bone.name)
+                    if self.copy_name_mode:
+                        # Copy bone name to clipboard
+                        bpy.context.window_manager.clipboard = min_bone.name
                         self.report(
-                            {"INFO"}, f"{self.data_path} set to {min_bone.name}")
+                            {"INFO"}, f"Copied {min_bone.name} to clipboard")
+                        self.__end(context, area)
+                        return {"FINISHED"}
+                    try:
+                        try:
+                            prop_type = getattr(self.property, "fixed_type")
+                        except AttributeError:
+                            prop_type = None
+                        if not prop_type:
+                            setattr(self.struct, self.property_name,
+                                    min_bone.name)
+                        if type(prop_type) == bpy.types.EditBone:
+                            edit_bone = self.target.data.edit_bones.get(
+                                min_bone.name)
+                            setattr(self.struct,
+                                    self.property_name, edit_bone)
+                        elif type(prop_type) == bpy.types.PoseBone:
+                            setattr(self.struct, self.property_name, min_bone)
+                        self.report(
+                            {"INFO"}, f"Set property to {min_bone.name}")
+                        self.__end(context, area)
+                        return {"FINISHED"}
                     except Exception as e:
                         self.report({"ERROR"}, f"Error setting property: {e}")
                         self.__end(context, area)
                         return {"CANCELLED"}
                 self.__end(context, area)
                 return {"FINISHED"}
-            elif event.type in {"RIGHTMOUSE", "ESC"}:
-                self.__end(context, area)
-                return {"CANCELLED"}
         area.tag_redraw()
         return {"PASS_THROUGH"}
 
     def invoke(self, context, event):
-        tmp = context.window_manager.clipboard
-        # I honestly can't believe this is the solution.
-        # Get the data path of the property
-        bpy.ops.ui.copy_data_path_button(full_path=True)
-        self.data_path = context.window_manager.clipboard
-        context.window_manager.clipboard = tmp
+        try:
+            self.struct = context.button_pointer
+            self.property = context.button_prop
+            self.property_name = context.property[1]
+            vaild_type = [{
+                "type": bpy.types.Constraint,
+                "property": ["subtarget", "pole_subtarget"],
+                "property_name": ["target", "object"]
+            }, {
+                "type": bpy.types.DriverTarget,
+                "property": ["bone_target"],
+                "property_name": ["id"],
+            }, {
+                "type": bpy.types.EditBone,
+                "property": ["parent"],
+                "property_name": ["id_data"],
+            },
+            ]
+            # Get struct
+            dict = next(
+                (item for item in vaild_type if item["type"] == type(self.struct) or issubclass(type(self.struct), item["type"])), None)
+            if dict:
+                # if self.property_name in dict["property"]:
+                for prop in dict["property_name"]:
+                    if hasattr(self.struct, prop):
+                        self.target = getattr(self.struct, prop)
+                        if type(self.target) != bpy.types.Object:
+                            # 暫定処置
+                            self.target = context.active_object
+                        break
+                else:
+                    self.report(
+                        {"ERROR"}, f"None of the properties {dict['property_name']} found in struct")
+                    return {"CANCELLED"}
+
+        except Exception as e:
+            # When called directly, mode to copy only the name of the bone for the active object
+            self.copy_name_mode = True
+            self.target = context.active_object
+            self.report(
+                {"INFO"}, "Copy bone name mode")
         self.bone_mesh = get_asset()
         self.__handle_remove(context)
         self.__handle_add(context)
@@ -335,18 +409,19 @@ def get_asset():
     return bpy.data.objects[asset_name]
 
 
-def get_constraint_from_datapath(data_path) -> tuple[bpy.types.Constraint, str | None]:
-    def remove_last_property(data_path):
+def get_struct_from_datapath(data_path) -> tuple[bpy.types.Constraint, str | None]:
+    def split_data_path(data_path):
         import re
         # Example:
         # bpy.data.objects["Armature"].pose.bones["Bone"].constraints["Constraint"].subtarget
         # -> bpy.data.objects["Armature"].pose.bones["Bone"].constraints["Constraint"]  subtarget
+        # or .rsplit('.', 1)
         pattern = r'(.*)\.[^.]+$'
         match = re.match(pattern, data_path)
         if match:
             return match.group(1), data_path.replace(match.group(1) + ".", "")
         return None, None
-    tuple_data_path = remove_last_property(data_path)
+    tuple_data_path = split_data_path(data_path)
     return eval(tuple_data_path[0]), tuple_data_path[1]
 
 
@@ -371,15 +446,14 @@ def get_region_under_cursor(
     return None, None, None
 
 
-def get_bone_from_cursor(
-        context, event, obj, region, space):
+def get_closest_bones(context, event, obj, region, space):
     """
-    Returns the bone closest to the cursor position in the specified region.
+    Returns the list of bones closes to the cursor position in the specified region.
     """
     coord = Vector((event.mouse_x - region.x, event.mouse_y - region.y))
-    min_dist = float("inf")
-    min_bone = None
     bones = get_visible_pose_bones(obj, event.shift)
+    bone_distances = []
+
     for b in bones:
         # world pos
         head = obj.matrix_world @ b.head
@@ -391,11 +465,11 @@ def get_bone_from_cursor(
         if bcoord is None:
             continue
         dist = (bcoord - coord).length
-        # find the closest bone
-        if dist < min_dist:
-            min_dist = dist
-            min_bone = b
-    return min_bone
+        bone_distances.append((b, dist))
+
+    # Sort bones by distance
+    bone_distances.sort(key=lambda x: x[1])
+    return [b[0] for b in bone_distances if b[1] < float("inf")]
 
 
 def get_visible_pose_bones(obj: bpy.types.Object, consider_hidden_bones=False):
@@ -410,7 +484,12 @@ def get_visible_pose_bones(obj: bpy.types.Object, consider_hidden_bones=False):
 
     # Get bones that don't belong to any collection
     all_bones = set(obj.data.bones)
-    collection_bones = {b for c in obj.data.collections_all for b in c.bones}
+    try:
+        collection_bones = {
+            b for c in obj.data.collections_all for b in c.bones}
+    except Exception as e:
+        collection_bones = set()
+
     # Bones that don't belong in either collection
     non_collection_bones = all_bones - collection_bones
     visible_bones.extend(
@@ -428,7 +507,7 @@ def get_visible_pose_bones(obj: bpy.types.Object, consider_hidden_bones=False):
 
 def draw_menu(self, context: bpy.types.Context):
     # context menu
-    if not context.property[1] in {"subtarget", "pole_subtarget"}:
+    if context and not context.property[1] in valid_properties:
         return
     layout = self.layout
     layout.separator()
