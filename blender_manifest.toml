@@ -3,7 +3,7 @@ schema_version = "1.0.0"
 # Example of manifest file for a Blender extension
 # Change the values according to your extension
 id = "bone_eyedropper"
-version = "1.1.1"
+version = "1.1.2"
 name = "Bone Eyedropper"
 tagline = "Select bone constrain subtarget using eyedropper"
 maintainer = "Nifs <0sd_phu@gmail.com>"
