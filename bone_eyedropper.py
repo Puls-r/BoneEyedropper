@@ -74,6 +74,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.depsgraph = None
         self.evaluated_cache = {}
         self.visible_bones_cache = {}
+        self.bmesh_cache = {}
 
     def __custom_shape_matrix(self, bone: bpy.types.PoseBone) -> Matrix:
         '''Get the custom shape matrix of the bone'''
@@ -119,6 +120,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             bm.to_mesh(mesh_data)
             bm.free()
             mesh_obj = bpy.data.objects.new("BBone", mesh_data)
+            
             return mesh_obj
 
         if bone.custom_shape:
@@ -137,11 +139,13 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             mesh_obj = create_bbone_mesh(bone)
             bone_w_mat = Matrix()
             mat = bone_w_mat
+            self.bmesh_cache[bone] = mesh_obj
         else:
-            mesh_obj = get_asset()
+            mesh_obj = get_asset().copy()
             bone_w_mat = self.target.matrix_world @ bone.matrix @ Matrix.Scale(
                 bone.length, 4)
             mat = bone_w_mat
+            self.bmesh_cache[bone] = mesh_obj
         return mat, mesh_obj.to_mesh()
 
     def __get_evaluated_cached(self, bone: bpy.types.PoseBone) -> tuple[Matrix, bpy.types.Mesh]:
@@ -171,6 +175,11 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__handle_remove(context)
         area.tag_redraw()
         context.workspace.status_text_set(None)
+        for mesh in self.bmesh_cache.values():
+            try:
+                bpy.data.meshes.remove(mesh.data)
+            except Exception:
+                pass
 
     def __draw(self, context):
         if (
@@ -470,8 +479,8 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                 self.__end(context, area)
                 return {"FINISHED"}
         area.tag_redraw()
-        # If viewpoint manipulation is disabled during the modal, the performance is further improved because the cache of vertex positions can be used. 
-        # return {"RUNNING_MODAL"} 
+        # If viewpoint manipulation is disabled during the modal, the performance is further improved because the cache of vertex positions can be used.
+        # return {"RUNNING_MODAL"}
         return {"PASS_THROUGH"}
 
     def invoke(self, context, event):
@@ -506,6 +515,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.depsgraph = context.evaluated_depsgraph_get()
         self.evaluated_cache.clear()
         self.visible_bones_cache.clear()
+        self.bmesh_cache.clear()
         self.__handle_remove(context)
         self.__handle_add(context)
         context.window_manager.modal_handler_add(self)
@@ -522,10 +532,7 @@ def load_object(blend_file_path, object_name):
 
 
 def get_asset(type=None):
-    if type == "BBone":
-        asset_name = "BoneEyeDropper_BBone_Default"
-    else:
-        asset_name = "BoneEyeDropper_Bone_Default"
+    asset_name = "BoneEyeDropper_Bone_Default"
     try:
         # Fix: use a unique name or another way to get the object
         return bpy.data.objects[asset_name]
