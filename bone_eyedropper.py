@@ -4,6 +4,7 @@
 # ------------------------------------------------------------------------------------------
 import bpy
 import blf
+import bmesh
 import gpu
 import math
 import os
@@ -36,12 +37,12 @@ void main()
     fragColor = blender_srgb_to_framebuffer_space(fcolor);
 }
 '''
-valid_properties = {
-    "subtarget": ["target", "object"],
-    "pole_subtarget": ["pole_target"],
-    "parent": ["id_data"],
-    "bone_target": ["id"],  # DriverTarget
+vaild_type = [{
+    "type": bpy.types.Constraint,
+    "property": ["subtarget", "pole_subtarget"],
+    "property_name": ["target", "object"]
 }
+]
 
 
 class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
@@ -62,20 +63,19 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__min_bone: bpy.types.PoseBone = None
         self.__mousecoord = None
         self.__bonecoord = None
-        self.data_path = None
-        self.object = None
         self.struct = None
         self.property = None
         self.property_name = None
         self.target = None
         self.hidden = False
         self.bones = []
-        self.bone_mesh = None
         self.current_bone_index = 0
         self.copy_name_mode = False
         self.depsgraph = None
+        self.evaluated_cache = {}
+        self.visible_bones_cache = {}
 
-    def __custom_shape_matrix(self, bone) -> Matrix:
+    def __custom_shape_matrix(self, bone: bpy.types.PoseBone) -> Matrix:
         '''Get the custom shape matrix of the bone'''
         if bone.custom_shape:
             translation_matrix = Matrix.Translation(
@@ -88,7 +88,39 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
 
     def __get_evaluated(self, bone: bpy.types.PoseBone) -> tuple[Matrix, bpy.types.Mesh]:
         '''Get the evaluated of the custom shape of the bone'''
-        # Remove bone_mesh
+        def create_bbone_mesh(bbone: bpy.types.PoseBone):
+            bm = bmesh.new()
+
+            for i in range(bbone.bone.bbone_segments):
+                cube = bmesh.ops.create_cube(bm, size=0.2)
+
+                id_data_matrix = bbone.id_data.matrix_world
+                if bbone.bone.bbone_segments > 1:
+                    # Get the current and next segment matrices
+                    mat_current = bbone.bbone_segment_matrix(i, rest=False)
+                    mat_next = bbone.bbone_segment_matrix(i + 1, rest=False)
+                    # Lerp between the two matrices
+                    blended_matrix = mat_current.lerp(mat_next, 0.5)
+                    matrix_final = bbone.matrix @ blended_matrix
+                else:
+                    matrix_final = bbone.matrix
+                    bmesh.ops.translate(
+                        bm, verts=cube["verts"], vec=Vector((0, 0.1, 0)))
+                bmesh.ops.scale(bm, verts=cube["verts"], vec=Vector((1, 5, 1)))
+                # Display size Scale
+                x = bbone.bone.bbone_x * 10
+                z = bbone.bone.bbone_z * 10
+                l = bbone.length / bbone.bone.bbone_segments
+                bmesh.ops.scale(bm, verts=cube["verts"], vec=Vector((x, l, z)))
+                bmesh.ops.transform(
+                    bm, verts=cube["verts"], matrix=matrix_final)
+
+            mesh_data = bpy.data.meshes.new("BBone_Mesh")
+            bm.to_mesh(mesh_data)
+            bm.free()
+            mesh_obj = bpy.data.objects.new("BBone", mesh_data)
+            return mesh_obj
+
         if bone.custom_shape:
             mesh_obj = bone.custom_shape
             if bone.custom_shape_transform:
@@ -96,16 +128,29 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                 bone_w_mat = self.target.matrix_world @ override_mat
             else:
                 bone_w_mat = self.target.matrix_world @ bone.matrix
+            mesh_obj = mesh_obj.evaluated_get(self.depsgraph)
+            # Apply custom shape transformation
+            # Scale the object to match the bone length
+            mat = bone_w_mat @ self.__custom_shape_matrix(
+                bone) @ Matrix.Scale(bone.length, 4)
+        elif bone.id_data.data.display_type == 'BBONE':
+            mesh_obj = create_bbone_mesh(bone)
+            bone_w_mat = Matrix()
+            mat = bone_w_mat
         else:
             mesh_obj = get_asset()
-            bone_w_mat = self.target.matrix_world @ bone.matrix
-        mesh_obj = mesh_obj.evaluated_get(self.depsgraph)
-        # Apply custom shape transformation
-        # Scale the object to match the bone length
-        length = bone.length
-        mat = bone_w_mat @ self.__custom_shape_matrix(
-            bone) @ Matrix.Scale(length, 4)
+            bone_w_mat = self.target.matrix_world @ bone.matrix @ Matrix.Scale(
+                bone.length, 4)
+            mat = bone_w_mat
         return mat, mesh_obj.to_mesh()
+
+    def __get_evaluated_cached(self, bone: bpy.types.PoseBone) -> tuple[Matrix, bpy.types.Mesh]:
+        '''Get the evaluated of the custom shape of the bone with caching'''
+        if bone in self.evaluated_cache:
+            return self.evaluated_cache[bone]
+        result = self.__get_evaluated(bone)
+        self.evaluated_cache[bone] = result
+        return result
 
     def __handle_add(self, context):
         if OBJECT_OT_BoneEyedropper.__handler is None:
@@ -146,14 +191,13 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             text_width, text_height = blf.dimensions(
                 font_id, self.__min_bone.name)
 
-            # Draw dashed line (Debug)
+            # Draw dashed line
             self.__draw_dashed_line()
 
             # Draw bone mesh
-            self.__draw_bone_mesh()
+            self.__draw_bone_mesh(context)
 
             # Set background color and draw rounded rectangle
-            gpu.state.blend_set("ALPHA")
             shader = gpu.shader.from_builtin("UNIFORM_COLOR")
             radius = 5
             vertices = self.__rounded_rect_vertices(
@@ -192,7 +236,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         batch = batch_for_shader(shader, "LINES", {"pos": vertices})
         batch.draw(shader)
 
-    def __draw_bone_mesh(self):
+    def __draw_bone_mesh(self, context):
         def generate_shader_batch(matrix, data):
             me = data
             me.calc_loop_triangles()
@@ -222,12 +266,13 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                 batch = batch_for_shader(
                     shader, 'LINES', {"position": vs, "color": cs, }, indices=es, )
                 # Set line width
-                gpu.state.line_width_set(2)
+                gpu.state.line_width_set(get_prefereces().line_width)
             else:
                 batch = batch_for_shader(
                     shader, 'TRIS', {"position": vs, "color": cs, }, indices=fs, )
             return shader, batch
-        matrix,  data = self.__get_evaluated(self.__min_bone)
+
+        matrix,  data = self.__get_evaluated_cached(self.__min_bone)
         shader, batch = generate_shader_batch(matrix, data)
         gpu.state.blend_set("ADDITIVE")
         shader.bind()
@@ -279,31 +324,35 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
 
         return vertices
 
-    def get_closest_bones(self, context, event, obj, region, space):
+    def __get_closest_bones(self, context, event, region, space):
         """
         Returns the list of bones closes to the cursor position in the specified region.
         """
+        def get_closest_vertex_to_cursor(mesh, mat, region, space, coord):
+            bcoords = [
+                location_3d_to_region_2d(
+                    region, space.region_3d, mat @ Vector(v.co))
+                for v in mesh.vertices
+            ]
+            bcoords = [bc for bc in bcoords if bc is not None]
+            if bcoords:
+                return min(bcoords, key=lambda x: (x - coord).length)
+            return None
         coord = Vector((event.mouse_x - region.x, event.mouse_y - region.y))
-        bones = self.get_visible_pose_bones(obj, event.shift)
+        bones = self.__get_visible_pose_bones(event.shift)
         bone_distances: List[Tuple[bpy.types.PoseBone, float, Vector]] = []
-
-        #TODO: Each loop generates a mesh and fetches the nearest vertices
-        for b in bones:
+        evaluated_bones = {b: self.__get_evaluated_cached(b) for b in bones}
+        for b, (mat, mesh) in evaluated_bones.items():
             bcoord = None
             if b.custom_shape:
-                mat, mesh = self.__get_evaluated(b)
-                bcoords = [
-                    location_3d_to_region_2d(
-                        region, space.region_3d, mat @ Vector(v.co))
-                    for v in mesh.vertices
-                ]
-                bcoords = [bc for bc in bcoords if bc is not None]
-                if bcoords:
-                    # Get the closest vertex to the cursor
-                    bcoord = min(bcoords, key=lambda x: (x - coord).length)
+                bcoord = get_closest_vertex_to_cursor(
+                    mesh, mat, region, space, coord)
+            elif b.id_data.data.display_type == 'BBONE':
+                bcoord = get_closest_vertex_to_cursor(
+                    mesh, mat, region, space, coord)
             else:
-                head = obj.matrix_world @ b.head
-                tail = obj.matrix_world @ b.tail
+                head = self.target.matrix_world @ b.head
+                tail = self.target.matrix_world @ b.tail
                 bone_world_center = (head + tail) / 2
                 bcoord = location_3d_to_region_2d(
                     region, space.region_3d, bone_world_center)
@@ -315,39 +364,49 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         bone_distances.sort(key=lambda x: x[1])
         return bone_distances
 
-    def get_visible_pose_bones(self, obj: bpy.types.Object, consider_hidden_bones=False):
+    def __get_visible_pose_bones(self, consider_hidden_bones=False):
+        '''Get visible pose bones with caching'''
+        cache_key = (self.target, consider_hidden_bones)
+        if cache_key in self.visible_bones_cache:
+            return self.visible_bones_cache[cache_key]
+
         # Get bones from visible Bone Collections
-        visible_bones = [
-            b
-            for c in obj.data.collections_all
+        visible_bones = {
+            b.name: b
+            for c in self.target.data.collections_all
             if c.is_visible or consider_hidden_bones
             for b in c.bones
             if not b.hide or consider_hidden_bones
-        ]
+        }
 
         # Get bones that don't belong to any collection
-        all_bones = set(obj.data.bones)
+        all_bones = set(self.target.data.bones)
         try:
             collection_bones = {
-                b for c in obj.data.collections_all for b in c.bones}
-        except Exception as e:
+                b for c in self.target.data.collections_all for b in c.bones
+            }
+        except Exception:
             collection_bones = set()
 
         # Bones that don't belong in either collection
         non_collection_bones = all_bones - collection_bones
-        visible_bones.extend(
-            b for b in non_collection_bones if not b.hide or consider_hidden_bones
-        )
+        visible_bones.update({
+            b.name: b for b in non_collection_bones if not b.hide or consider_hidden_bones
+        })
 
         # Convert to pose bones
-        pose_bones = obj.pose.bones
-        return [
-            pose_bones.get(b.name)
-            for b in visible_bones
-            if pose_bones.get(b.name) is not None
+        pose_bones = self.target.pose.bones
+        result = [
+            pose_bones.get(b_name)
+            for b_name in visible_bones
+            if pose_bones.get(b_name) is not None
         ]
 
+        self.visible_bones_cache[cache_key] = result
+        return result
+
     def modal(self, context, event):
+
         # Update status text
         context.workspace.status_text_set(
             f"Ctl+Wheel: Change closest bone | Shift: Get hidden bones | LMB: Set bone | RMB/Esc: Cancel")
@@ -371,8 +430,8 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             if event.type == "MOUSEMOVE":
                 self.current_bone_index = 0
             # Get min bone from the list
-            self.bones = self.get_closest_bones(
-                context, event, self.target, region, space
+            self.bones = self.__get_closest_bones(
+                context, event, region, space
             )
             if event.type == "WHEELUPMOUSE" and event.ctrl:
                 # limit the index to the length of the list
@@ -384,7 +443,6 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                     self.current_bone_index - 1, 0)
             self.__min_bone = self.bones[self.current_bone_index][0]
             self.__bonecoord = self.bones[self.current_bone_index][2]
-            # self.__update_bone_coords(region, event, space)
             self.__mousecoord = Vector(
                 (event.mouse_x - region.x, event.mouse_y - region.y)
             )
@@ -399,21 +457,8 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                         self.__end(context, area)
                         return {"FINISHED"}
                     try:
-                        try:
-                            prop_type = getattr(self.property, "fixed_type")
-                        except AttributeError:
-                            prop_type = None
-                        if not prop_type:
-                            setattr(self.struct, self.property_name,
-                                    self.__min_bone.name)
-                        if type(prop_type) == bpy.types.EditBone:
-                            edit_bone = self.target.data.edit_bones.get(
+                        setattr(self.struct, self.property_name,
                                 self.__min_bone.name)
-                            setattr(self.struct,
-                                    self.property_name, edit_bone)
-                        elif type(prop_type) == bpy.types.PoseBone:
-                            setattr(self.struct, self.property_name,
-                                    self.__min_bone)
                         self.report(
                             {"INFO"}, f"Set property to {self.__min_bone.name}")
                         self.__end(context, area)
@@ -425,27 +470,13 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                 self.__end(context, area)
                 return {"FINISHED"}
         area.tag_redraw()
-        return {"PASS_THROUGH"}
 
     def invoke(self, context, event):
         try:
             self.struct = context.button_pointer
             self.property = context.button_prop
             self.property_name = context.property[1]
-            vaild_type = [{
-                "type": bpy.types.Constraint,
-                "property": ["subtarget", "pole_subtarget"],
-                "property_name": ["target", "object"]
-            }, {
-                "type": bpy.types.DriverTarget,
-                "property": ["bone_target"],
-                "property_name": ["id"],
-            }, {
-                "type": bpy.types.EditBone,
-                "property": ["parent"],
-                "property_name": ["id_data"],
-            },
-            ]
+
             # Get struct
             dict = next(
                 (item for item in vaild_type if item["type"] == type(self.struct) or issubclass(type(self.struct), item["type"])), None)
@@ -470,6 +501,8 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             self.report(
                 {"INFO"}, "Copy bone name mode")
         self.depsgraph = context.evaluated_depsgraph_get()
+        self.evaluated_cache.clear()
+        self.visible_bones_cache.clear()
         self.__handle_remove(context)
         self.__handle_add(context)
         context.window_manager.modal_handler_add(self)
@@ -485,8 +518,11 @@ def load_object(blend_file_path, object_name):
             print(f"Object '{object_name}' not found in '{blend_file_path}'")
 
 
-def get_asset():
-    asset_name = "BoneEyeDropper_Bone_Default"
+def get_asset(type=None):
+    if type == "BBone":
+        asset_name = "BoneEyeDropper_BBone_Default"
+    else:
+        asset_name = "BoneEyeDropper_Bone_Default"
     try:
         # Fix: use a unique name or another way to get the object
         return bpy.data.objects[asset_name]
@@ -497,22 +533,6 @@ def get_asset():
         addon_directory, "assets", "Bone_Asset.blend")
     load_object(blend_file_path, asset_name)
     return bpy.data.objects[asset_name]
-
-
-def get_struct_from_datapath(data_path) -> tuple[bpy.types.Constraint, str | None]:
-    def split_data_path(data_path):
-        import re
-        # Example:
-        # bpy.data.objects["Armature"].pose.bones["Bone"].constraints["Constraint"].subtarget
-        # -> bpy.data.objects["Armature"].pose.bones["Bone"].constraints["Constraint"]  subtarget
-        # or .rsplit('.', 1)
-        pattern = r'(.*)\.[^.]+$'
-        match = re.match(pattern, data_path)
-        if match:
-            return match.group(1), data_path.replace(match.group(1) + ".", "")
-        return None, None
-    tuple_data_path = split_data_path(data_path)
-    return eval(tuple_data_path[0]), tuple_data_path[1]
 
 
 def get_prefereces():
@@ -538,7 +558,7 @@ def get_region_under_cursor(
 
 def draw_menu(self, context: bpy.types.Context):
     # context menu
-    if context and not context.property[1] in valid_properties:
+    if context and not context.property[1] in vaild_type[0]["property"]:
         return
     layout = self.layout
     layout.separator()
@@ -558,6 +578,15 @@ class BoneEyedropperPreferences(bpy.types.AddonPreferences):
         max=1.0,
         soft_min=0.0,
         soft_max=1.0,
+    )
+
+    line_width: bpy.props.IntProperty(
+        name="Line Width",
+        default=5,
+        min=1,
+        max=100,
+        soft_min=1,
+        soft_max=100,
     )
 
     text_size: bpy.props.IntProperty(
@@ -596,6 +625,8 @@ class BoneEyedropperPreferences(bpy.types.AddonPreferences):
         layout = self.layout
         row = layout.row()
         row.prop(self, "bone_suggestions_color")
+        row = layout.row()
+        row.prop(self, "line_width")
         row = layout.row()
         row.prop(self, "text_size")
         row = layout.row()
