@@ -470,6 +470,9 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                 self.__end(context, area)
                 return {"FINISHED"}
         area.tag_redraw()
+        # If viewpoint manipulation is disabled during the modal, the performance is further improved because the cache of vertex positions can be used. 
+        # return {"RUNNING_MODAL"} 
+        return {"PASS_THROUGH"}
 
     def invoke(self, context, event):
         try:
