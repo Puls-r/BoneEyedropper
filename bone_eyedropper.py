@@ -63,7 +63,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__min_bone: bpy.types.PoseBone = None
         self.__mousecoord = None
         self.__bonecoord = None
-        self.struct = None
+        self.__struct = None
         self.property = None
         self.property_name = None
         self.target = None
@@ -72,9 +72,11 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.current_bone_index = 0
         self.copy_name_mode = False
         self.depsgraph = None
-        self.evaluated_cache = {}
-        self.visible_bones_cache = {}
-        self.bmesh_cache = {}
+        self.__evaluated_cache: dict[tuple[Matrix, bpy.types.Mesh]] = {}
+        self.__visible_bones_cache = {}
+        self.__bmesh_cache = {}
+        self.coords_cache_key = None
+        self.__coords_cache: dict[bpy.types.PoseBone, list[Vector]] = {}
 
     def __custom_shape_matrix(self, bone: bpy.types.PoseBone) -> Matrix:
         '''Get the custom shape matrix of the bone'''
@@ -120,7 +122,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             bm.to_mesh(mesh_data)
             bm.free()
             mesh_obj = bpy.data.objects.new("BBone", mesh_data)
-            
+
             return mesh_obj
 
         if bone.custom_shape:
@@ -138,21 +140,21 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         elif bone.id_data.data.display_type == 'BBONE':
             mesh_obj = create_bbone_mesh(bone)
             mat = bone.id_data.matrix_world
-            self.bmesh_cache[bone] = mesh_obj
+            self.__bmesh_cache[bone] = mesh_obj
         else:
             mesh_obj = get_asset().copy()
             bone_w_mat = self.target.matrix_world @ bone.matrix @ Matrix.Scale(
                 bone.length, 4)
             mat = bone_w_mat
-            self.bmesh_cache[bone] = mesh_obj
+            self.__bmesh_cache[bone] = mesh_obj
         return mat, mesh_obj.to_mesh()
 
     def __get_evaluated_cached(self, bone: bpy.types.PoseBone) -> tuple[Matrix, bpy.types.Mesh]:
         '''Get the evaluated of the custom shape of the bone with caching'''
-        if bone in self.evaluated_cache:
-            return self.evaluated_cache[bone]
+        if bone in self.__evaluated_cache:
+            return self.__evaluated_cache[bone]
         result = self.__get_evaluated(bone)
-        self.evaluated_cache[bone] = result
+        self.__evaluated_cache[bone] = result
         return result
 
     def __handle_add(self, context):
@@ -174,7 +176,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__handle_remove(context)
         area.tag_redraw()
         context.workspace.status_text_set(None)
-        for mesh in self.bmesh_cache.values():
+        for mesh in self.__bmesh_cache.values():
             try:
                 bpy.data.meshes.remove(mesh.data)
             except Exception:
@@ -332,32 +334,46 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
 
         return vertices
 
+    def __get_closest_vertex_to_cursor(self, mesh, mat, region, space, coord, bone: bpy.types.PoseBone):
+        current_key = (Vector((region.width, region.height)),
+                       space.region_3d.perspective_matrix, self.hidden)
+        if self.coords_cache_key == current_key and bone.name in self.__coords_cache and self.__coords_cache[bone.name]:
+            return min(self.__coords_cache[bone.name], key=lambda x: (x - coord).length)
+        bcoords = []
+        for v in mesh.vertices:
+            coord = location_3d_to_region_2d(
+                region, space.region_3d, mat @ v.co)
+            # Exclude None
+            if coord:
+                bcoords.append(coord)
+        # Update cache
+        self.__coords_cache[bone.name] = bcoords
+        if bcoords and coord:
+            # Get the closest vertex to the cursor
+            return min(bcoords, key=lambda x: (x - coord).length)
+        return None
+
     def __get_closest_bones(self, context, event, region, space):
         """
         Returns the list of bones closes to the cursor position in the specified region.
         """
-        def get_closest_vertex_to_cursor(mesh, mat, region, space, coord):
-            bcoords = [
-                location_3d_to_region_2d(
-                    region, space.region_3d, mat @ Vector(v.co))
-                for v in mesh.vertices
-            ]
-            bcoords = [bc for bc in bcoords if bc is not None]
-            if bcoords:
-                return min(bcoords, key=lambda x: (x - coord).length)
-            return None
         coord = Vector((event.mouse_x - region.x, event.mouse_y - region.y))
-        bones = self.__get_visible_pose_bones(event.shift)
+        bones = self.__get_visible_pose_bones()
         bone_distances: List[Tuple[bpy.types.PoseBone, float, Vector]] = []
         evaluated_bones = {b: self.__get_evaluated_cached(b) for b in bones}
+        if coord is None:
+            return bone_distances
         for b, (mat, mesh) in evaluated_bones.items():
             bcoord = None
+            # Custom shape
             if b.custom_shape:
-                bcoord = get_closest_vertex_to_cursor(
-                    mesh, mat, region, space, coord)
+                bcoord = self.__get_closest_vertex_to_cursor(
+                    mesh, mat, region, space, coord, b)
+            # BBone
             elif b.id_data.data.display_type == 'BBONE' and b.bone.bbone_segments > 1:
-                bcoord = get_closest_vertex_to_cursor(
-                    mesh, mat, region, space, coord)
+                bcoord = self.__get_closest_vertex_to_cursor(
+                    mesh, mat, region, space, coord, b)
+            # Default
             else:
                 head = self.target.matrix_world @ b.head
                 tail = self.target.matrix_world @ b.tail
@@ -365,18 +381,23 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                 bcoord = location_3d_to_region_2d(
                     region, space.region_3d, bone_world_center)
 
+            # Calculate distance
             if bcoord:
                 dist = (bcoord - coord).length
                 bone_distances.append((b, dist, bcoord))
-
+        # Update cache key
+        self.coords_cache_key = (Vector((region.width, region.height)),
+                                 space.region_3d.perspective_matrix.copy(), self.hidden)
         bone_distances.sort(key=lambda x: x[1])
         return bone_distances
 
-    def __get_visible_pose_bones(self, consider_hidden_bones=False):
+    def __get_visible_pose_bones(self):
         '''Get visible pose bones with caching'''
+        consider_hidden_bones = self.hidden
         cache_key = (self.target, consider_hidden_bones)
-        if cache_key in self.visible_bones_cache:
-            return self.visible_bones_cache[cache_key]
+        # Get from cache
+        if cache_key in self.__visible_bones_cache:
+            return self.__visible_bones_cache[cache_key]
 
         # Get bones from visible Bone Collections
         visible_bones = {
@@ -410,92 +431,92 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             if pose_bones.get(b_name) is not None
         ]
 
-        self.visible_bones_cache[cache_key] = result
+        self.__visible_bones_cache[cache_key] = result
         return result
 
     def modal(self, context, event):
-
         # Update status text
-        context.workspace.status_text_set(
-            f"Ctl+Wheel: Change closest bone | Shift: Get hidden bones | LMB: Set bone | RMB/Esc: Cancel")
+        try:
+            context.workspace.status_text_set(
+                f"Ctl+Wheel: Change closest bone | Shift: Get hidden bones | LMB: Set bone | RMB/Esc: Cancel")
 
-        context.window.cursor_set("EYEDROPPER")
-        region, area, space = get_region_under_cursor(context, event)
-        if event.type in {"RIGHTMOUSE", "ESC"}:
+            context.window.cursor_set("EYEDROPPER")
+            region, area, space = get_region_under_cursor(context, event)
+            if event.type in {"RIGHTMOUSE", "ESC"}:
+                self.__end(context, area)
+                return {"CANCELLED"}
+            self.hidden = event.shift
+            if region is None:
+                # Cursor is not in a 3D view or Outliner
+                return {"PASS_THROUGH"}
+            if area.type == "OUTLINER":
+                # TODO:How to get active bone from outliner context?
+                return {"PASS_THROUGH"}
+            elif area.type == "VIEW_3D":
+                if event.type == "MOUSEMOVE":
+                    self.current_bone_index = 0
+                # Get min bone from the list
+                self.bones = self.__get_closest_bones(
+                    context, event, region, space
+                )
+                if event.type == "WHEELUPMOUSE" and event.ctrl:
+                    # limit the index to the length of the list
+                    self.current_bone_index = min(
+                        self.current_bone_index + 1, len(self.bones) - 1)
+                elif event.type == "WHEELDOWNMOUSE" and event.ctrl:
+                    # limit the index to 0
+                    self.current_bone_index = max(
+                        self.current_bone_index - 1, 0)
+                self.__min_bone = self.bones[self.current_bone_index][0]
+                self.__bonecoord = self.bones[self.current_bone_index][2]
+                self.__mousecoord = Vector(
+                    (event.mouse_x - region.x, event.mouse_y - region.y)
+                )
+                if event.type == "LEFTMOUSE" and event.value == "PRESS":
+                    # Set
+                    if self.__min_bone:
+                        if self.copy_name_mode:
+                            # Copy bone name to clipboard
+                            bpy.context.window_manager.clipboard = self.__min_bone.name
+                            self.report(
+                                {"INFO"}, f"Copied {self.__min_bone.name} to clipboard")
+                            self.__end(context, area)
+                            return {"FINISHED"}
+                        try:
+                            setattr(self.__struct, self.property_name,
+                                    self.__min_bone.name)
+                            self.report(
+                                {"INFO"}, f"Set property to {self.__min_bone.name}")
+                            self.__end(context, area)
+                            return {"FINISHED"}
+                        except Exception as e:
+                            self.report(
+                                {"ERROR"}, f"Error setting property: {e}")
+                            self.__end(context, area)
+                            return {"CANCELLED"}
+                    self.__end(context, area)
+                    return {"FINISHED"}
+            area.tag_redraw()
+            return {"PASS_THROUGH"}
+        except Exception as e:
+            self.report({"ERROR"}, f"Error: {e}")
             self.__end(context, area)
             return {"CANCELLED"}
-        if event.shift:
-            self.hidden = True
-        else:
-            self.hidden = False
-        if region is None:
-            # Cursor is not in a 3D view or Outliner
-            return {"PASS_THROUGH"}
-        if area.type == "OUTLINER":
-            # How to get active bone from outliner context?
-            return {"PASS_THROUGH"}
-        elif area.type == "VIEW_3D":
-            if event.type == "MOUSEMOVE":
-                self.current_bone_index = 0
-            # Get min bone from the list
-            self.bones = self.__get_closest_bones(
-                context, event, region, space
-            )
-            if event.type == "WHEELUPMOUSE" and event.ctrl:
-                # limit the index to the length of the list
-                self.current_bone_index = min(
-                    self.current_bone_index + 1, len(self.bones) - 1)
-            elif event.type == "WHEELDOWNMOUSE" and event.ctrl:
-                # limit the index to 0
-                self.current_bone_index = max(
-                    self.current_bone_index - 1, 0)
-            self.__min_bone = self.bones[self.current_bone_index][0]
-            self.__bonecoord = self.bones[self.current_bone_index][2]
-            self.__mousecoord = Vector(
-                (event.mouse_x - region.x, event.mouse_y - region.y)
-            )
-            if event.type == "LEFTMOUSE" and event.value == "PRESS":
-                # Set
-                if self.__min_bone:
-                    if self.copy_name_mode:
-                        # Copy bone name to clipboard
-                        bpy.context.window_manager.clipboard = self.__min_bone.name
-                        self.report(
-                            {"INFO"}, f"Copied {self.__min_bone.name} to clipboard")
-                        self.__end(context, area)
-                        return {"FINISHED"}
-                    try:
-                        setattr(self.struct, self.property_name,
-                                self.__min_bone.name)
-                        self.report(
-                            {"INFO"}, f"Set property to {self.__min_bone.name}")
-                        self.__end(context, area)
-                        return {"FINISHED"}
-                    except Exception as e:
-                        self.report({"ERROR"}, f"Error setting property: {e}")
-                        self.__end(context, area)
-                        return {"CANCELLED"}
-                self.__end(context, area)
-                return {"FINISHED"}
-        area.tag_redraw()
-        # If viewpoint manipulation is disabled during the modal, the performance is further improved because the cache of vertex positions can be used.
-        # return {"RUNNING_MODAL"}
-        return {"PASS_THROUGH"}
 
     def invoke(self, context, event):
         try:
-            self.struct = context.button_pointer
+            self.__struct = context.button_pointer
             self.property = context.button_prop
             self.property_name = context.property[1]
 
             # Get struct
             dict = next(
-                (item for item in vaild_type if item["type"] == type(self.struct) or issubclass(type(self.struct), item["type"])), None)
+                (item for item in vaild_type if item["type"] == type(self.__struct) or issubclass(type(self.__struct), item["type"])), None)
             if dict:
                 # if self.property_name in dict["property"]:
                 for prop in dict["property_name"]:
-                    if hasattr(self.struct, prop):
-                        self.target = getattr(self.struct, prop)
+                    if hasattr(self.__struct, prop):
+                        self.target = getattr(self.__struct, prop)
                         if type(self.target) != bpy.types.Object:
                             # TODO: temporary
                             self.target = context.active_object
@@ -512,9 +533,10 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             self.report(
                 {"INFO"}, "Copy bone name mode")
         self.depsgraph = context.evaluated_depsgraph_get()
-        self.evaluated_cache.clear()
-        self.visible_bones_cache.clear()
-        self.bmesh_cache.clear()
+        self.__evaluated_cache.clear()
+        self.__visible_bones_cache.clear()
+        self.__bmesh_cache.clear()
+        self.__coords_cache.clear()
         self.__handle_remove(context)
         self.__handle_add(context)
         context.window_manager.modal_handler_add(self)
