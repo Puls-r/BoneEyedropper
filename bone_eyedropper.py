@@ -137,8 +137,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
                 bone) @ Matrix.Scale(bone.length, 4)
         elif bone.id_data.data.display_type == 'BBONE':
             mesh_obj = create_bbone_mesh(bone)
-            bone_w_mat = Matrix()
-            mat = bone_w_mat
+            mat = bone.id_data.matrix_world
             self.bmesh_cache[bone] = mesh_obj
         else:
             mesh_obj = get_asset().copy()
@@ -356,7 +355,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             if b.custom_shape:
                 bcoord = get_closest_vertex_to_cursor(
                     mesh, mat, region, space, coord)
-            elif b.id_data.data.display_type == 'BBONE':
+            elif b.id_data.data.display_type == 'BBONE' and b.bone.bbone_segments > 1:
                 bcoord = get_closest_vertex_to_cursor(
                     mesh, mat, region, space, coord)
             else:
