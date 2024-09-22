@@ -74,7 +74,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.depsgraph = None
         self.__evaluated_cache: dict[tuple[Matrix, bpy.types.Mesh]] = {}
         self.__visible_bones_cache = {}
-        self.__bmesh_cache = {}
+        self.__bone_mesh_cache: dict[bpy.types.PoseBone, bpy.types.Object] = {}
         self.coords_cache_key = None
         self.__coords_cache: dict[bpy.types.PoseBone, list[Vector]] = {}
 
@@ -97,12 +97,11 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             for i in range(bbone.bone.bbone_segments):
                 cube = bmesh.ops.create_cube(bm, size=0.2)
 
-                id_data_matrix = bbone.id_data.matrix_world
                 if bbone.bone.bbone_segments > 1:
                     # Get the current and next segment matrices
                     mat_current = bbone.bbone_segment_matrix(i, rest=False)
                     mat_next = bbone.bbone_segment_matrix(i + 1, rest=False)
-                    # Lerp between the two matrices
+                    # Lerp between the two matrices to reproduce BBone (not correct)
                     blended_matrix = mat_current.lerp(mat_next, 0.5)
                     matrix_final = bbone.matrix @ blended_matrix
                 else:
@@ -136,18 +135,23 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             # Apply custom shape transformation
             # Scale the object to match the bone length
             mat = bone_w_mat @ self.__custom_shape_matrix(
-                bone) @ Matrix.Scale(bone.length, 4)
+                bone)
+            if bone.use_custom_shape_bone_size:
+                mat = mat @ Matrix.Scale(bone.length, 4)
         elif bone.id_data.data.display_type == 'BBONE':
             mesh_obj = create_bbone_mesh(bone)
             mat = bone.id_data.matrix_world
-            self.__bmesh_cache[bone] = mesh_obj
+            self.__bone_mesh_cache[bone] = mesh_obj
         else:
             mesh_obj = get_asset().copy()
-            bone_w_mat = self.target.matrix_world @ bone.matrix @ Matrix.Scale(
+            mat = self.target.matrix_world @ bone.matrix @ Matrix.Scale(
                 bone.length, 4)
-            mat = bone_w_mat
-            self.__bmesh_cache[bone] = mesh_obj
-        return mat, mesh_obj.to_mesh()
+            self.__bone_mesh_cache[bone] = mesh_obj
+        if mesh_obj.type != 'MESH':
+           mesh = mesh_obj.to_mesh() 
+        else:   
+            mesh = mesh_obj.data
+        return mat, mesh
 
     def __get_evaluated_cached(self, bone: bpy.types.PoseBone) -> tuple[Matrix, bpy.types.Mesh]:
         '''Get the evaluated of the custom shape of the bone with caching'''
@@ -176,11 +180,15 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.__handle_remove(context)
         area.tag_redraw()
         context.workspace.status_text_set(None)
-        for mesh in self.__bmesh_cache.values():
+        for mesh_obj in self.__bone_mesh_cache.values():
             try:
-                bpy.data.meshes.remove(mesh.data)
+                bpy.data.meshes.remove(mesh_obj.data)
             except Exception:
                 pass
+        self.__evaluated_cache.clear()
+        self.__visible_bones_cache.clear()
+        self.__bone_mesh_cache.clear()
+        self.__coords_cache.clear()
 
     def __draw(self, context):
         if (
@@ -213,6 +221,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             vertices = self.__rounded_rect_vertices(
                 x - 5, y - 5, text_width + 15, text_height + 10, radius
             )
+            gpu.state.blend_set("ALPHA")
             batch = batch_for_shader(shader, "TRI_FAN", {"pos": vertices})
             shader.bind()
             shader.uniform_float("color", pref.back_color)
@@ -290,47 +299,31 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         batch.draw(shader)
 
     def __rounded_rect_vertices(self, x, y, width, height, radius):
+        def corner_vertices(cx, cy, start_angle):
+            return [
+                (
+                    cx + radius *
+                    math.cos(start_angle + (i / segments) * (math.pi / 2)),
+                    cy + radius *
+                    math.sin(start_angle + (i / segments) * (math.pi / 2)),
+                )
+                for i in range(segments + 1)
+            ]
+
         vertices = []
         segments = 4
+
         # Bottom-left corner
-        for i in range(segments + 1):
-            angle = (i / segments) * (math.pi / 2)
-            vertices.append(
-                (
-                    x + radius - radius * math.cos(angle),
-                    y + radius - radius * math.sin(angle),
-                )
-            )
-
+        vertices.extend(corner_vertices(x + radius, y + radius, math.pi))
         # Bottom-right corner
-        for i in range(segments + 1):
-            angle = (i / segments) * (math.pi / 2)
-            vertices.append(
-                (
-                    x + width - radius + radius * math.sin(angle),
-                    y + radius - radius * math.cos(angle),
-                )
-            )
-
+        vertices.extend(corner_vertices(
+            x + width - radius, y + radius, -math.pi / 2))
         # Top-right corner
-        for i in range(segments + 1):
-            angle = (i / segments) * (math.pi / 2)
-            vertices.append(
-                (
-                    x + width - radius + radius * math.cos(angle),
-                    y + height - radius + radius * math.sin(angle),
-                )
-            )
-
+        vertices.extend(corner_vertices(
+            x + width - radius, y + height - radius, 0))
         # Top-left corner
-        for i in range(segments + 1):
-            angle = (i / segments) * (math.pi / 2)
-            vertices.append(
-                (
-                    x + radius - radius * math.sin(angle),
-                    y + height - radius + radius * math.cos(angle),
-                )
-            )
+        vertices.extend(corner_vertices(
+            x + radius, y + height - radius, math.pi / 2))
 
         return vertices
 
@@ -500,6 +493,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
             return {"PASS_THROUGH"}
         except Exception as e:
             self.report({"ERROR"}, f"Error: {e}")
+            print(e)
             self.__end(context, area)
             return {"CANCELLED"}
 
@@ -535,7 +529,7 @@ class OBJECT_OT_BoneEyedropper(bpy.types.Operator):
         self.depsgraph = context.evaluated_depsgraph_get()
         self.__evaluated_cache.clear()
         self.__visible_bones_cache.clear()
-        self.__bmesh_cache.clear()
+        self.__bone_mesh_cache.clear()
         self.__coords_cache.clear()
         self.__handle_remove(context)
         self.__handle_add(context)
@@ -562,8 +556,7 @@ def get_asset(type=None):
     addon_directory = os.path.dirname(__file__)
     blend_file_path = os.path.join(
         addon_directory, "assets", "Bone_Asset.blend")
-    load_object(blend_file_path, asset_name)
-    return bpy.data.objects[asset_name]
+    return bpy.data.objects[load_object(blend_file_path, asset_name)]
 
 
 def get_prefereces():
