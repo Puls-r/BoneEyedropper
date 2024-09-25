@@ -41,7 +41,11 @@ vaild_type = [{
     "type": bpy.types.Constraint,
     "property": ["subtarget", "pole_subtarget"],
     "property_name": ["target", "object"]
-}
+}, {
+    "type": bpy.types.ConstraintTargetBone,
+    "property": ["subtarget"],
+    "property_name": ["target"]
+},
 ]
 
 
